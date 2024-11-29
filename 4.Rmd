@@ -1,0 +1,574 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup}
+knitr::opts_knit$set(root.dir = "/Users/zhangtianyi/Desktop/kaggle/kaggle")
+```
+
+
+```{r}
+train_data <- read.csv("examples.csv", stringsAsFactors = FALSE)
+test_data <- read.csv("test.csv", stringsAsFactors = FALSE)
+```
+
+
+```{r}
+library(tidyverse)
+library(caret)
+library(text2vec)
+library(quanteda)
+library(topicmodels)
+
+str(train_data)
+summary(train_data)
+
+colSums(is.na(train_data))
+colSums(is.na(test_data))
+```
+
+```{r}
+
+process_q2 <- function(data) {
+  q2_medians <- aggregate(q2 ~ q1, data=data[!is.na(data$q2),], FUN=median)
+  
+  lookup <- setNames(q2_medians$q2, q2_medians$q1)
+  
+  data$q2_imputed <- data$q2
+  missing_idx <- which(is.na(data$q2))
+  
+  for(idx in missing_idx) {
+    current_q1 <- data$q1[idx]
+    if(current_q1 %in% names(lookup)) {
+      data$q2_imputed[idx] <- lookup[as.character(current_q1)]
+    } else {
+      data$q2_imputed[idx] <- median(data$q2, na.rm=TRUE)
+    }
+  }
+  
+  data$q2_missing <- as.numeric(is.na(data$q2))
+  
+  return(data)
+}
+
+train_data <- process_q2(train_data)
+test_data <- process_q2(test_data)
+
+create_advanced_features <- function(data) {
+  data$response_consistency <- apply(data[,paste0("q", 4:20)], 1, 
+                                   function(x) sd(x, na.rm = TRUE))
+  
+  data$extreme_response <- apply(data[,paste0("q", 4:20)], 1, 
+                                function(x) {
+                                  max_val <- max(x, na.rm = TRUE)
+                                  mean(x %in% c(0, max_val), na.rm = TRUE)
+                                })
+  
+  data$q4_6_mean <- rowMeans(data[,paste0("q", 4:6)], na.rm = TRUE)
+  data$q7_10_mean <- rowMeans(data[,paste0("q", 7:10)], na.rm = TRUE)
+  data$q11_15_mean <- rowMeans(data[,paste0("q", 11:15)], na.rm = TRUE)
+  data$q16_20_mean <- rowMeans(data[,paste0("q", 16:20)], na.rm = TRUE)
+  
+  data$q4_6_sd <- apply(data[,paste0("q", 4:6)], 1, sd, na.rm = TRUE)
+  data$q7_10_sd <- apply(data[,paste0("q", 7:10)], 1, sd, na.rm = TRUE)
+  data$q11_15_sd <- apply(data[,paste0("q", 11:15)], 1, sd, na.rm = TRUE)
+  data$q16_20_sd <- apply(data[,paste0("q", 16:20)], 1, sd, na.rm = TRUE)
+  
+  return(data)
+}
+
+train_data <- create_advanced_features(train_data)
+test_data <- create_advanced_features(test_data)
+
+library(tm)
+process_text <- function(text) {
+  text <- as.character(text)  
+  text <- tolower(text)
+  text <- removePunctuation(text)
+  text <- removeNumbers(text)
+  text <- stripWhitespace(text)
+  return(text)
+}
+
+create_text_features <- function(data) {
+  data$combined_text <- paste(ifelse(is.na(data$q21), "", data$q21), 
+                            ifelse(is.na(data$q22), "", data$q22), 
+                            sep = " ")
+  data$combined_text <- sapply(data$combined_text, process_text)
+  
+  data$text_length <- nchar(data$combined_text)
+  data$word_count <- sapply(strsplit(data$combined_text, " "), length)
+  
+  return(data)
+}
+
+train_data <- create_text_features(train_data)
+test_data <- create_text_features(test_data)
+
+summary(train_data[,c("response_consistency", "extreme_response", 
+                     "q4_6_mean", "q7_10_mean", "q11_15_mean", "q16_20_mean",
+                     "text_length", "word_count", 
+                     "q4_6_sd", "q7_10_sd", "q11_15_sd", "q16_20_sd")])
+```
+
+
+# 1
+
+```{r}
+library(xgboost)
+library(lightgbm)
+library(Matrix)
+
+prepare_features <- function(data) {
+  numeric_features <- c(paste0("q", 3:20),
+                       "q2_imputed", "q2_missing", 
+                       "response_consistency", "extreme_response",
+                       paste0("q", c("4_6", "7_10", "11_15", "16_20"), "_mean"), 
+                       paste0("q", c("4_6", "7_10", "11_15", "16_20"), "_sd"),
+                       "text_length", "word_count") 
+  
+  q1_dummies <- model.matrix(~ factor(q1) - 1, data=data)
+  colnames(q1_dummies) <- paste0("q1_", 0:7)
+  
+  features <- cbind(as.matrix(data[, numeric_features]), q1_dummies)
+  
+  return(features)
+}
+
+X_train <- prepare_features(train_data)
+X_test <- prepare_features(test_data)
+y_train <- as.numeric(train_data$label) - 1 
+
+set.seed(42)
+folds <- createFolds(y_train, k=5, list=TRUE)
+
+xgb_params <- list(
+  objective = "multi:softprob",
+  num_class = 6,
+  max_depth = 6,
+  eta = 0.03,
+  subsample = 0.7,
+  colsample_bytree = 0.7,
+  min_child_weight = 3,
+  gamma = 0.1
+)
+
+lgb_params <- list(
+  objective = "multiclass",
+  num_class = 6,
+  learning_rate = 0.03,
+  num_leaves = 31,
+  feature_fraction = 0.7,
+  bagging_fraction = 0.7,
+  bagging_freq = 5,
+  min_data_in_leaf = 5,
+  max_depth = 6
+)
+
+xgb_cv_preds <- matrix(0, nrow=length(y_train), ncol=6)
+lgb_cv_preds <- matrix(0, nrow=length(y_train), ncol=6)
+xgb_test_preds <- matrix(0, nrow=nrow(X_test), ncol=6)
+lgb_test_preds <- matrix(0, nrow=nrow(X_test), ncol=6)
+
+for(i in seq_along(folds)) {
+  train_idx <- unlist(folds[-i])
+  valid_idx <- folds[[i]]
+  
+  dtrain <- xgb.DMatrix(X_train[train_idx,], label=y_train[train_idx])
+  dvalid <- xgb.DMatrix(X_train[valid_idx,], label=y_train[valid_idx])
+  watchlist <- list(train=dtrain, valid=dvalid)
+  
+  xgb_model <- xgb.train(
+    params = xgb_params,
+    data = dtrain,
+    nrounds = 1000,
+    watchlist = watchlist,
+    early_stopping_rounds = 50,
+    verbose = 0
+  )
+  
+  xgb_cv_preds[valid_idx,] <- predict(xgb_model, xgb.DMatrix(X_train[valid_idx,]), reshape=TRUE)
+  xgb_test_preds <- xgb_test_preds + predict(xgb_model, xgb.DMatrix(X_test), reshape=TRUE) / length(folds)
+  
+  dtrain_lgb <- lgb.Dataset(X_train[train_idx,], label=y_train[train_idx])
+  dvalid_lgb <- lgb.Dataset(X_train[valid_idx,], label=y_train[valid_idx])
+  
+  lgb_model <- lgb.train(
+    params = lgb_params,
+    data = dtrain_lgb,
+    valids = list(valid=dvalid_lgb),
+    nrounds = 1000,
+    early_stopping_rounds = 50,
+    verbose = -1
+  )
+  
+  lgb_cv_preds[valid_idx,] <- predict(lgb_model, X_train[valid_idx,])
+  lgb_test_preds <- lgb_test_preds + predict(lgb_model, X_test) / length(folds)
+}
+
+blend_weights <- c(0.5, 0.5) 
+final_preds <- (xgb_test_preds * blend_weights[1] + lgb_test_preds * blend_weights[2])
+final_classes <- max.col(final_preds)
+
+xgb_cv_classes <- max.col(xgb_cv_preds)
+lgb_cv_classes <- max.col(lgb_cv_preds)
+blend_cv_preds <- (xgb_cv_preds * blend_weights[1] + lgb_cv_preds * blend_weights[2])
+blend_cv_classes <- max.col(blend_cv_preds)
+
+print("XGBoost CV Accuracy:")
+print(mean(xgb_cv_classes == (y_train + 1)))
+print("LightGBM CV Accuracy:")
+print(mean(lgb_cv_classes == (y_train + 1)))
+print("Blend CV Accuracy:")
+print(mean(blend_cv_classes == (y_train + 1)))
+
+predictions_df <- data.frame(
+  Id = test_data$Id,
+  label = final_classes
+)
+write.csv(predictions_df, "kaggle_preds_1.csv", row.names = FALSE)
+```
+
+# 2
+
+```{r}
+library(randomForest)
+library(e1071)
+library(class)
+library(nnet)
+library(caret)
+
+preprocess_features <- function(train_data, test_data = NULL, is_training = TRUE) {
+  numeric_features <- c(paste0("q", 3:20), 
+                       "q2_imputed", 
+                       "response_consistency", "extreme_response",
+                       paste0("q", c("4_6", "7_10", "11_15", "16_20"), "_mean"),
+                       paste0("q", c("4_6", "7_10", "11_15", "16_20"), "_sd"),
+                       "text_length", "word_count")
+  
+  if(is_training) {
+    preprocess_params <- preProcess(train_data[, numeric_features], 
+                                  method = c("center", "scale"))
+    saveRDS(preprocess_params, "preprocess_params.rds")
+  } else {
+    preprocess_params <- readRDS("preprocess_params.rds")
+  }
+  
+  if(is_training) {
+    processed_data <- predict(preprocess_params, train_data[, numeric_features])
+  } else {
+    processed_data <- predict(preprocess_params, test_data[, numeric_features])
+  }
+  
+  if(is_training) {
+    q1_matrix <- model.matrix(~ factor(q1) - 1, train_data)
+  } else {
+    q1_matrix <- model.matrix(~ factor(q1) - 1, test_data)
+  }
+  
+  final_features <- cbind(processed_data, q1_matrix)
+  return(as.data.frame(final_features))
+}
+
+X_train_processed <- preprocess_features(train_data, is_training = TRUE)
+X_test_processed <- preprocess_features(train_data, test_data, is_training = FALSE)
+y_train <- factor(train_data$label)
+
+get_base_predictions <- function(model_rf, model_svm, X_data) {
+  pred_rf <- predict(model_rf, X_data, type = "prob")
+  
+  pred_svm <- attr(predict(model_svm, X_data, probability = TRUE), "probabilities")
+  
+  pred_knn <- knn(train = X_train_processed, 
+                  test = X_data, 
+                  cl = y_train, 
+                  k = 5, 
+                  prob = TRUE)
+  
+  meta_features <- cbind(pred_rf, pred_svm)
+  return(meta_features)
+}
+
+set.seed(42)
+folds <- createFolds(y_train, k = 5, list = TRUE)
+cv_meta_features <- matrix(0, nrow = nrow(X_train_processed), ncol = 12)  # 6(RF) + 6(SVM)
+test_meta_features <- matrix(0, nrow = nrow(X_test_processed), ncol = 12)
+cv_predictions <- numeric(length(y_train))
+
+for(i in seq_along(folds)) {
+  train_idx <- unlist(folds[-i])
+  valid_idx <- folds[[i]]
+  
+  rf_model <- randomForest(x = X_train_processed[train_idx,],
+                          y = y_train[train_idx],
+                          ntree = 500,
+                          mtry = sqrt(ncol(X_train_processed)),
+                          importance = TRUE)
+  
+  svm_model <- svm(x = X_train_processed[train_idx,],
+                   y = y_train[train_idx],
+                   probability = TRUE,
+                   kernel = "radial")
+  
+  valid_meta <- get_base_predictions(rf_model, svm_model, X_train_processed[valid_idx,])
+  cv_meta_features[valid_idx,] <- valid_meta
+
+  test_fold_meta <- get_base_predictions(rf_model, svm_model, X_test_processed)
+  test_meta_features <- test_meta_features + test_fold_meta / length(folds)
+}
+
+meta_model <- nnet(x = cv_meta_features,
+                  y = class.ind(y_train),
+                  size = 10,
+                  decay = 0.1,
+                  maxit = 1000,
+                  trace = FALSE)
+
+final_predictions <- predict(meta_model, test_meta_features)
+final_classes <- max.col(final_predictions)
+
+cv_meta_preds <- predict(meta_model, cv_meta_features)
+cv_classes <- max.col(cv_meta_preds)
+
+print("Stacking Model CV Accuracy:")
+print(mean(cv_classes == as.numeric(y_train)))
+
+predictions_df <- data.frame(
+  Id = test_data$Id,
+  label = final_classes
+)
+write.csv(predictions_df, "kaggle_preds_2.csv", row.names = FALSE)
+
+importance_rf <- importance(rf_model)
+print("Random Forest Feature Importance:")
+print(head(sort(importance_rf[,1], decreasing = TRUE), 10))
+```
+
+# 3
+```{r}
+library(rpart)
+library(ipred)
+
+prepare_features <- function(data) {
+  features <- data.frame(
+    data[, c("q3", "q4", "q5", "q6", "q9", "q10", "q11", "q12", 
+             "q13", "q14", "q15", "q16", "q17", "q18", "q19", "q20")],
+    response_consistency = data$response_consistency,
+    extreme_response = data$extreme_response,
+    q4_6_mean = data$q4_6_mean,
+    q16_20_mean = data$q16_20_mean,
+    q1 = factor(data$q1),
+    q2_imputed = data$q2_imputed
+  )
+  return(features)
+}
+
+X_train <- prepare_features(train_data)
+y_train <- factor(train_data$label)
+X_test <- prepare_features(test_data)
+
+set.seed(42)
+k <- 5 
+folds <- sample(1:k, nrow(X_train), replace = TRUE)
+cv_preds <- numeric(nrow(X_train))
+test_preds_matrix <- matrix(0, nrow = nrow(X_test), ncol = k)
+
+for(i in 1:k) {
+  train_idx <- which(folds != i)
+  valid_idx <- which(folds == i)
+  
+  bag_model <- bagging(
+    formula = factor(label) ~ .,
+    data = cbind(X_train[train_idx,], label = y_train[train_idx]),
+    nbagg = 100,  
+    coob = TRUE  
+  )
+  
+  cv_preds[valid_idx] <- predict(bag_model, newdata = X_train[valid_idx,])
+  
+  test_preds_matrix[,i] <- predict(bag_model, newdata = X_test)
+  
+  fold_acc <- mean(predict(bag_model, newdata = X_train[valid_idx,]) == y_train[valid_idx])
+  print(paste("Fold", i, "Accuracy:", round(fold_acc, 3)))
+}
+
+cv_accuracy <- mean(cv_preds == y_train)
+print(paste("\nOverall CV Accuracy:", round(cv_accuracy, 3)))
+
+final_predictions <- apply(test_preds_matrix, 1, function(x) {
+  as.numeric(names(sort(table(x), decreasing = TRUE)[1]))
+})
+
+conf_matrix <- table(Predicted = cv_preds, Actual = y_train)
+print("\nConfusion Matrix:")
+print(conf_matrix)
+
+class_accuracy <- diag(conf_matrix) / colSums(conf_matrix)
+print("\nPer-class Accuracy:")
+print(round(class_accuracy, 3))
+
+predictions_df <- data.frame(
+  Id = test_data$Id,
+  label = final_predictions
+)
+write.csv(predictions_df, "kaggle_preds_3.csv", row.names = FALSE)
+
+full_model <- rpart(factor(label) ~ ., data = cbind(X_train, label = y_train))
+importance <- full_model$variable.importance
+print("\nFeature Importance:")
+print(sort(importance, decreasing = TRUE)[1:10])
+```
+
+# 4
+
+```{r}
+library(caret)
+library(ranger)
+library(xgboost)
+library(glmnet)
+
+create_enhanced_features <- function(data) {
+  features <- data.frame(
+    data[, c(paste0("q", 3:20))],
+    
+    response_consistency = data$response_consistency,
+    extreme_response = data$extreme_response,
+    q4_6_mean = data$q4_6_mean,
+    q7_10_mean = data$q7_10_mean,
+    q11_15_mean = data$q11_15_mean,
+    q16_20_mean = data$q16_20_mean,
+    q4_6_sd = data$q4_6_sd,
+    q7_10_sd = data$q7_10_sd,
+    q11_15_sd = data$q11_15_sd,
+    q16_20_sd = data$q16_20_sd,
+    
+    q4_to_q6_ratio = data$q4 / (data$q6 + 1e-6),
+    q7_to_q10_ratio = data$q7 / (data$q10 + 1e-6),
+    q11_to_q15_ratio = data$q11 / (data$q15 + 1e-6),
+    q16_to_q20_ratio = data$q16 / (data$q20 + 1e-6),
+    
+    q16_20_mean_squared = data$q16_20_mean^2,
+    response_consistency_squared = data$response_consistency^2,
+    
+    mean_sd_interaction = data$q16_20_mean * data$q16_20_sd,
+    consistency_extreme_interaction = data$response_consistency * data$extreme_response,
+    
+    q1 = factor(data$q1),
+    q2_imputed = data$q2_imputed,
+    q2_missing = data$q2_missing
+  )
+  
+  return(features)
+}
+
+X_train_enhanced <- create_enhanced_features(train_data)
+X_test_enhanced <- create_enhanced_features(test_data)
+y_train <- factor(train_data$label)
+
+set.seed(42)
+folds <- createFolds(y_train, k = 5, list = TRUE)
+
+ranger_cv_preds <- matrix(0, nrow = nrow(X_train_enhanced), ncol = 6)
+xgb_cv_preds <- matrix(0, nrow = nrow(X_train_enhanced), ncol = 6)
+glmnet_cv_preds <- matrix(0, nrow = nrow(X_train_enhanced), ncol = 6)
+
+ranger_test_preds <- matrix(0, nrow = nrow(X_test_enhanced), ncol = 6)
+xgb_test_preds <- matrix(0, nrow = nrow(X_test_enhanced), ncol = 6)
+glmnet_test_preds <- matrix(0, nrow = nrow(X_test_enhanced), ncol = 6)
+
+for(i in seq_along(folds)) {
+  train_idx <- unlist(folds[-i])
+  valid_idx <- folds[[i]]
+  
+  train_data_fold <- X_train_enhanced[train_idx,]
+  valid_data_fold <- X_train_enhanced[valid_idx,]
+  
+  train_matrix <- model.matrix(~ . - 1, data = train_data_fold)
+  valid_matrix <- model.matrix(~ . - 1, data = valid_data_fold)
+  test_matrix <- model.matrix(~ . - 1, data = X_test_enhanced)
+  
+  ranger_model <- ranger(
+    dependent.variable.name = "label",
+    data = cbind(train_data_fold, label = y_train[train_idx]),
+    num.trees = 500,
+    probability = TRUE,
+    importance = "impurity"
+  )
+  
+  xgb_params <- list(
+    objective = "multi:softprob",
+    num_class = 6,
+    max_depth = 6,
+    eta = 0.03,
+    subsample = 0.7,
+    colsample_bytree = 0.7
+  )
+  
+  dtrain <- xgb.DMatrix(train_matrix, label = as.numeric(y_train[train_idx]) - 1)
+  xgb_model <- xgb.train(
+    params = xgb_params,
+    data = dtrain,
+    nrounds = 1000,
+    verbose = 0
+  )
+  
+  glmnet_model <- cv.glmnet(
+    x = train_matrix,
+    y = y_train[train_idx],
+    family = "multinomial",
+    alpha = 0.5,
+    type.measure = "class"
+  )
+  
+  ranger_cv_preds[valid_idx,] <- predict(ranger_model, data = valid_data_fold)$predictions
+  xgb_cv_preds[valid_idx,] <- predict(xgb_model, xgb.DMatrix(valid_matrix), reshape = TRUE)
+  glmnet_cv_preds[valid_idx,] <- predict(glmnet_model, newx = valid_matrix, type = "response")[,,1]
+  
+  ranger_test_preds <- ranger_test_preds + 
+    predict(ranger_model, data = X_test_enhanced)$predictions / length(folds)
+  xgb_test_preds <- xgb_test_preds + 
+    predict(xgb_model, xgb.DMatrix(test_matrix), reshape = TRUE) / length(folds)
+  glmnet_test_preds <- glmnet_test_preds + 
+    predict(glmnet_model, newx = test_matrix, type = "response")[,,1] / length(folds)
+}
+
+weights <- c(0.4, 0.4, 0.2)  
+final_test_preds <- ranger_test_preds * weights[1] + 
+                    xgb_test_preds * weights[2] + 
+                    glmnet_test_preds * weights[3]
+
+final_classes <- max.col(final_test_preds)
+
+predictions_df <- data.frame(
+  Id = test_data$Id,
+  label = final_classes
+)
+
+write.csv(predictions_df, "kaggle_preds_4.csv", row.names = FALSE)
+
+blend_cv_preds <- ranger_cv_preds * weights[1] + 
+                  xgb_cv_preds * weights[2] + 
+                  glmnet_cv_preds * weights[3]
+cv_classes <- max.col(blend_cv_preds)
+
+print("Ensemble Model CV Accuracy:")
+print(mean(cv_classes == as.numeric(y_train)))
+
+ranger_full <- ranger(
+  dependent.variable.name = "label",
+  data = cbind(X_train_enhanced, label = y_train),
+  num.trees = 500,
+  importance = "impurity"
+)
+
+importance_scores <- ranger_full$variable.importance
+top_features <- head(sort(importance_scores, decreasing = TRUE), 10)
+print("\nTop 10 Important Features:")
+print(top_features)
+```
+
+
+
