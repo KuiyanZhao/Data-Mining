@@ -31,12 +31,12 @@
 # to ensure you're working on the right problem, for the right people, in the
 # right way and time.
 #
-# T1: TAPS wants a system to better identify what stage of the grief journey their survivors are on. The model should accurately match survivors to their corresponding step in the grief journey.
-# T2: TAPS wants to better help their survivor network and military family survivors want the most appropriate care that they can receive
-# T3: This problem is amenable to an analytics solution as we can use text and data mining to try and predict what stage of the grief journey the survivor is on based off of their survey results
-# T4: Accurately map what part of the grief process survivors are on based off of their survey results.
-# T5: This model will drastically cut down on evaluation time and allow TAPS to more efficiently connect survivors to the care that is most appropriate for them.
-# T6: CAPS agrees that this framing is correct as they have come to us with this problem.
+# T1:
+# T2:
+# T3:
+# T4:
+# T5:
+# T6:
 #
 ################################################################################
 # Analytics Problem Framing
@@ -44,10 +44,10 @@
 # Review the five Analytics Problem Framing tasks and provide concise answers
 # to T1-T4.
 #
-# T1: Use survey results (text and numbers) to accurately predict what step of the grief journey that survivors are on, maximizing F1.
-# T2: Words like miserable, awful, depressed, terrible may have a higher frequency when it comes to someone in the grief stage. Furthermore, lower values on survey results may correlate to an earilier stage in the grief journey.
-# T3: We are assuming that those surveyed are being honest and sharing their true feelings
-# T4: A high level of accuracy when it comes to our predictions will mean success, in this case we are trying to maximize our F1.
+# T1:
+# T2:
+# T3:
+# T4:
 #
 ################################################################################
 # Data
@@ -60,7 +60,8 @@
 # Q6 (1 point): 
 # Read in the examples.csv kaggle dataset using the read.table() function.
 # It should be in R as a data.frame called 'd'.
-setwd("/Users/zhangtianyi/Desktop/200/code/kaggle")
+getwd()
+setwd("kaggle")
 d <- read.table("examples.csv", header = TRUE, sep = ",", stringsAsFactors = FALSE)
 
 
@@ -474,6 +475,7 @@ myModel1 <- train(y ~ q4+q5+q6+q7+q8+q9+q10+q11+q12+q13+q14+q15+q16+q17+q18+q19+
                   method = "rf",       # Random Forest model
                   trControl = ctrl,    # how you want to learn
                   metric = "Accuracy",  # performance measure
+                  tuneGrid = expand.grid(mtry = c(2, 4, 6, 8))
 )
 myModel1
 
@@ -493,5 +495,5 @@ preds <- predict(myModel1, newdata=test)
 preds_df <- data.frame(Id=test$Id, label=as.numeric(preds))
 write.csv(preds_df, file="kaggle_preds.csv", row.names=FALSE, quote=c(1))
 
-# Kaggle score: [0.88393]
+# Kaggle score: []
 
